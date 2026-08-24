@@ -10,7 +10,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/schedule")
-@CrossOrigin(origins = "http://localhost:5173")
+@CrossOrigin(origins = "*")
 public class ScheduledMeetingController {
 
     private final ScheduledMeetingRepository scheduledMeetingRepository;

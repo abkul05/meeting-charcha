@@ -10,7 +10,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/meetings")
-@CrossOrigin(origins = "http://localhost:5173") // Allow requests from Vite frontend
+@CrossOrigin(origins = "*") // Allow requests from any frontend origin (e.g. Vercel, localhost)
 public class MeetingController {
 
     private final MeetingService meetingService;

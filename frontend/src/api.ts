@@ -1,6 +1,8 @@
 import axios from 'axios';
 
-const API_BASE_URL = 'http://localhost:8081/api/meetings';
+const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8081';
+const API_BASE_URL = `${BASE_URL}/api/meetings`;
+const SCHEDULE_API_URL = `${BASE_URL}/api/schedule`;
 const USE_MOCK_API = false; // Set to true to bypass backend since JDK is missing
 
 export interface Meeting {
@@ -137,7 +139,7 @@ export interface ScheduledMeeting {
 export const scheduleApi = {
     getAll: async (): Promise<ScheduledMeeting[]> => {
         if (USE_MOCK_API) return [];
-        const response = await axios.get('http://localhost:8081/api/schedule');
+        const response = await axios.get(SCHEDULE_API_URL);
         return response.data;
     },
     
@@ -145,7 +147,7 @@ export const scheduleApi = {
         if (USE_MOCK_API) {
             return { ...meeting, id: Math.floor(Math.random() * 1000) };
         }
-        const response = await axios.post('http://localhost:8081/api/schedule', meeting);
+        const response = await axios.post(SCHEDULE_API_URL, meeting);
         return response.data;
     }
 };
