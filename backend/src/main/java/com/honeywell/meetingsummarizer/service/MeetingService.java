@@ -157,53 +157,64 @@ public class MeetingService {
     }
 
     private boolean summarizeWithGroq(Meeting meeting, String title, String content) {
-        try {
-            RestTemplate restTemplate = new RestTemplate();
-            String url = "https://api.groq.com/openai/v1/chat/completions";
+        String[] models = {"llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"};
 
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.setBearerAuth(groqApiKey.trim());
+        for (String model : models) {
+            try {
+                RestTemplate restTemplate = new RestTemplate();
+                String url = "https://api.groq.com/openai/v1/chat/completions";
 
-            String systemPrompt = "You are 'Meeting Charcha', an expert AI meeting intelligence analyst.\n" +
-                    "Analyze the provided transcript and extract high-value insights strictly based on the spoken content.\n" +
-                    "CRITICAL: The \"summary\" must be a concise, executive-level gist (2-4 sentences) that synthesizes the core message, context, and key takeaway. DO NOT repeat or echo the transcript verbatim.\n" +
-                    "Return ONLY a JSON object with these exact keys:\n" +
-                    "- \"summary\": A high-level executive gist summarizing the conversation, its core topic, and the overall outcome.\n" +
-                    "- \"actionItems\": Markdown checklist of specific tasks or actions mentioned with deadlines formatted as \"- [ ] Task (Due: Deadline)\". If none, write \"- No specific action items mentioned.\"\n" +
-                    "- \"decisions\": Markdown bullet points summarizing the key takeaways, agreements, or announcements.\n" +
-                    "- \"openQuestions\": Markdown bullet points of any unresolved questions, uncertainties, or follow-ups.";
+                HttpHeaders headers = new HttpHeaders();
+                headers.setContentType(MediaType.APPLICATION_JSON);
+                headers.setBearerAuth(groqApiKey.trim());
 
-            Map<String, Object> requestBody = new HashMap<>();
-            requestBody.put("model", "llama-3.3-70b-versatile");
-            requestBody.put("temperature", 0.3);
+                String systemPrompt = "You are 'Meeting Charcha', an elite executive AI meeting analyst.\n" +
+                        "Analyze the provided transcript and produce a concise executive summary, actionable tasks, decisions, and questions.\n" +
+                        "CRITICAL INSTRUCTIONS:\n" +
+                        "1. \"summary\": Write a concise, 2-3 sentence executive gist explaining what the discussion was about, key context, and the overall outcome. DO NOT copy or repeat the transcript verbatim.\n" +
+                        "2. \"actionItems\": A markdown bulleted checklist of any tasks or commitments mentioned, with deadlines if stated formatted as \"- [ ] Task (Due: Deadline)\". If no tasks, write \"- No action items identified.\"\n" +
+                        "3. \"decisions\": Markdown bullet points summarizing the core takeaways, announcements, or agreements.\n" +
+                        "4. \"openQuestions\": Markdown bullet points of any questions asked or follow-ups needed.\n\n" +
+                        "Return ONLY valid JSON matching this schema: {\"summary\": \"...\", \"actionItems\": \"...\", \"decisions\": \"...\", \"openQuestions\": \"...\"}";
 
-            List<Map<String, String>> messages = new ArrayList<>();
-            messages.add(Map.of("role", "system", "content", systemPrompt));
-            messages.add(Map.of("role", "user", "content", "Audio Transcript:\n" + content));
-            requestBody.put("messages", messages);
+                Map<String, Object> requestBody = new HashMap<>();
+                requestBody.put("model", model);
+                requestBody.put("temperature", 0.2);
 
-            Map<String, String> responseFormat = new HashMap<>();
-            responseFormat.put("type", "json_object");
-            requestBody.put("response_format", responseFormat);
+                List<Map<String, String>> messages = new ArrayList<>();
+                messages.add(Map.of("role", "system", "content", systemPrompt));
+                messages.add(Map.of("role", "user", "content", "Meeting Title: " + title + "\n\nSpoken Content:\n" + content));
+                requestBody.put("messages", messages);
 
-            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(requestBody, headers);
-            ResponseEntity<String> response = restTemplate.postForEntity(url, entity, String.class);
+                Map<String, String> responseFormat = new HashMap<>();
+                responseFormat.put("type", "json_object");
+                requestBody.put("response_format", responseFormat);
 
-            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                JsonNode root = objectMapper.readTree(response.getBody());
-                String contentJson = root.path("choices").get(0).path("message").path("content").asText();
-                String cleaned = cleanJsonOutput(contentJson);
-                JsonNode parsed = objectMapper.readTree(cleaned);
+                HttpEntity<Map<String, Object>> entity = new HttpEntity<>(requestBody, headers);
+                ResponseEntity<String> response = restTemplate.postForEntity(url, entity, String.class);
 
-                meeting.setSummary(extractJsonField(parsed, "summary", "Summary based on conversation:\n" + content));
-                meeting.setActionItems(extractJsonField(parsed, "actionItems", "- [ ] Review discussed topics."));
-                meeting.setDecisions(extractJsonField(parsed, "decisions", "- Key points from conversation noted."));
-                meeting.setOpenQuestions(extractJsonField(parsed, "openQuestions", "- None identified."));
-                return true;
+                if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                    JsonNode root = objectMapper.readTree(response.getBody());
+                    String contentJson = root.path("choices").get(0).path("message").path("content").asText();
+                    String cleaned = cleanJsonOutput(contentJson);
+                    JsonNode parsed = objectMapper.readTree(cleaned);
+
+                    String summary = extractJsonField(parsed, "summary", null);
+                    String actionItems = extractJsonField(parsed, "actionItems", "- No specific action items mentioned.");
+                    String decisions = extractJsonField(parsed, "decisions", "- Key points noted from conversation.");
+                    String openQuestions = extractJsonField(parsed, "openQuestions", "- None identified.");
+
+                    if (summary != null && !summary.trim().isEmpty()) {
+                        meeting.setSummary(summary);
+                        meeting.setActionItems(actionItems);
+                        meeting.setDecisions(decisions);
+                        meeting.setOpenQuestions(openQuestions);
+                        return true;
+                    }
+                }
+            } catch (Exception e) {
+                System.err.println("Groq LLM failed with model " + model + ": " + e.getMessage());
             }
-        } catch (Exception e) {
-            System.err.println("Groq LLM error: " + e.getMessage());
         }
         return false;
     }
@@ -330,16 +341,31 @@ public class MeetingService {
     }
 
     private String extractJsonField(JsonNode node, String fieldName, String defaultValue) {
-        if (node.has(fieldName)) {
-            JsonNode f = node.get(fieldName);
-            if (f.isArray()) {
-                StringBuilder sb = new StringBuilder();
-                for (JsonNode item : f) {
-                    sb.append("- ").append(item.asText()).append("\n");
+        if (node == null || !node.isObject()) return defaultValue;
+
+        String targetNorm = fieldName.replaceAll("[^a-zA-Z0-9]", "").toLowerCase();
+
+        Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            String keyNorm = entry.getKey().replaceAll("[^a-zA-Z0-9]", "").toLowerCase();
+
+            if (keyNorm.equals(targetNorm) || keyNorm.contains(targetNorm) || targetNorm.contains(keyNorm)) {
+                JsonNode f = entry.getValue();
+                if (f.isArray()) {
+                    StringBuilder sb = new StringBuilder();
+                    for (JsonNode item : f) {
+                        String text = item.asText().trim();
+                        if (!text.startsWith("-")) {
+                            sb.append("- ");
+                        }
+                        sb.append(text).append("\n");
+                    }
+                    return sb.toString().trim();
+                } else if (f.isTextual() && !f.asText().trim().isEmpty()) {
+                    return f.asText().trim();
                 }
-                return sb.toString().trim();
             }
-            return f.asText();
         }
         return defaultValue;
     }
