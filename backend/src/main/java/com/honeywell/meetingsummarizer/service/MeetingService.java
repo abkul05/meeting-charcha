@@ -69,7 +69,7 @@ public class MeetingService {
             }
         }
 
-        // 3. Heuristic fallback
+        // 3. Smart Heuristic fallback if AI keys are missing
         if (!aiSuccess) {
             applyHeuristicSummary(meeting, content);
         }
@@ -83,7 +83,7 @@ public class MeetingService {
 
         boolean audioProcessed = false;
 
-        // 1. Try Groq Whisper (Ultra fast, state of the art speech-to-text)
+        // 1. Try Groq Whisper (Ultra-fast speech-to-text)
         if (hasValidKey(groqApiKey) && file != null && !file.isEmpty()) {
             try {
                 String transcript = transcribeAudioWithGroq(file);
@@ -113,7 +113,7 @@ public class MeetingService {
         if (!audioProcessed) {
             String filename = file != null ? file.getOriginalFilename() : "audio_recording.mp3";
             meeting.setContent("[Audio Recording: " + filename + "]\n\n" +
-                               "Meeting audio uploaded. Ensure your Groq API key (gsk_...) is configured on Render to activate real-time Whisper transcription.");
+                               "Audio uploaded successfully. Add your GROQ_API_KEY in Render to enable instant Whisper transcription.");
             applyHeuristicSummary(meeting, meeting.getContent());
         }
 
@@ -165,20 +165,21 @@ public class MeetingService {
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.setBearerAuth(groqApiKey.trim());
 
-            String systemPrompt = "You are 'Meeting Charcha', an elite executive AI meeting analyst.\n" +
-                    "Analyze the provided transcript and produce a detailed, highly structured breakdown in strict JSON format.\n" +
+            String systemPrompt = "You are 'Meeting Charcha', an expert AI meeting analyst.\n" +
+                    "Analyze the provided transcript and extract all insights strictly based on what was actually said in the audio/transcript.\n" +
+                    "Do NOT use generic templates or irrelevant corporate filler.\n" +
                     "Return ONLY a JSON object with these exact keys:\n" +
-                    "- \"summary\": A thorough, comprehensive executive overview explaining the key topics, background context, and major discussion outcomes in depth.\n" +
-                    "- \"actionItems\": A markdown bulleted checklist of all actionable tasks and responsibilities. Extract any explicit deadlines mentioned (e.g. today, tomorrow, Friday, next week, EOD, specific dates) and format each item as: \"- [ ] Task description (Due: Deadline)\".\n" +
-                    "- \"decisions\": A markdown bulleted list of all decisions, agreements, and next steps finalized.\n" +
-                    "- \"openQuestions\": A markdown bulleted list of unanswered questions, blockers, or discussion points.";
+                    "- \"summary\": A clear, professional summary explaining exactly what was said in the transcript/audio in detail.\n" +
+                    "- \"actionItems\": Markdown bullet points of actionable items and tasks. If deadlines are mentioned (e.g. tomorrow, Friday, next week, EOD), format as: \"- [ ] Task (Due: Deadline)\". If none, state \"- No specific action items mentioned.\"\n" +
+                    "- \"decisions\": Markdown bullet points explaining all key points, announcements, decisions, or core takeaways from the conversation.\n" +
+                    "- \"openQuestions\": Markdown bullet points of any questions asked, unresolved items, or potential follow-ups.";
 
             Map<String, Object> requestBody = new HashMap<>();
             requestBody.put("model", "llama-3.3-70b-versatile");
 
             List<Map<String, String>> messages = new ArrayList<>();
             messages.add(Map.of("role", "system", "content", systemPrompt));
-            messages.add(Map.of("role", "user", "content", "Meeting Title: " + title + "\n\nTranscript:\n" + content));
+            messages.add(Map.of("role", "user", "content", "Audio Transcript:\n" + content));
             requestBody.put("messages", messages);
 
             Map<String, String> responseFormat = new HashMap<>();
@@ -191,12 +192,13 @@ public class MeetingService {
             if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
                 JsonNode root = objectMapper.readTree(response.getBody());
                 String contentJson = root.path("choices").get(0).path("message").path("content").asText();
-                JsonNode parsed = objectMapper.readTree(contentJson);
+                String cleaned = cleanJsonOutput(contentJson);
+                JsonNode parsed = objectMapper.readTree(cleaned);
 
-                if (parsed.has("summary")) meeting.setSummary(parsed.get("summary").asText());
-                if (parsed.has("actionItems")) meeting.setActionItems(parsed.get("actionItems").asText());
-                if (parsed.has("decisions")) meeting.setDecisions(parsed.get("decisions").asText());
-                if (parsed.has("openQuestions")) meeting.setOpenQuestions(parsed.get("openQuestions").asText());
+                meeting.setSummary(extractJsonField(parsed, "summary", "Summary based on conversation:\n" + content));
+                meeting.setActionItems(extractJsonField(parsed, "actionItems", "- [ ] Review discussed topics."));
+                meeting.setDecisions(extractJsonField(parsed, "decisions", "- Key points from conversation noted."));
+                meeting.setOpenQuestions(extractJsonField(parsed, "openQuestions", "- None identified."));
                 return true;
             }
         } catch (Exception e) {
@@ -206,22 +208,21 @@ public class MeetingService {
     }
 
     private boolean summarizeWithGemini(Meeting meeting, String title, String content) {
-        String[] models = {"gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"};
+        String[] models = {"gemini-1.5-flash", "gemini-2.0-flash"};
 
         for (String model : models) {
             try {
                 RestTemplate restTemplate = new RestTemplate();
                 String url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + geminiApiKey.trim();
 
-                String promptText = "You are an expert executive AI meeting assistant called 'Meeting Charcha'.\n" +
-                        "Analyze the following meeting titled '" + title + "':\n\n" +
-                        "Transcript / Spoken Notes:\n" + content + "\n\n" +
-                        "Provide a comprehensive, detailed breakdown in a strict JSON format with these exact keys:\n" +
-                        "- \"summary\": A detailed, thorough executive summary explaining the main conversation topics, strategic context, and key outcomes.\n" +
-                        "- \"actionItems\": A markdown bulleted checklist of every assigned task. Detect any mentioned deadlines (e.g. today, tomorrow, Friday, next week, EOD, specific dates) and format each item as: \"- [ ] Task description (Due: Deadline)\".\n" +
-                        "- \"decisions\": A markdown bulleted list of all decisions, agreements, and next steps finalized during the meeting.\n" +
-                        "- \"openQuestions\": A markdown bulleted list of unresolved topics, unanswered questions, or potential risks mentioned.\n\n" +
-                        "Return ONLY raw valid JSON.";
+                String promptText = "You are 'Meeting Charcha', an expert AI analyst.\n" +
+                        "Analyze this spoken content:\n\n" + content + "\n\n" +
+                        "Provide a strict JSON object explaining the actual content with exact keys:\n" +
+                        "- \"summary\": A clear summary explaining exactly what was said.\n" +
+                        "- \"actionItems\": Markdown checklist with deadlines if mentioned (format: \"- [ ] Task (Due: Deadline)\").\n" +
+                        "- \"decisions\": Markdown bullet points of key takeaways and decisions.\n" +
+                        "- \"openQuestions\": Markdown bullet points of open questions or follow-ups.\n" +
+                        "Return ONLY raw JSON.";
 
                 Map<String, Object> requestBody = new HashMap<>();
                 Map<String, Object> part = new HashMap<>();
@@ -241,13 +242,13 @@ public class MeetingService {
                     JsonNode candidates = root.path("candidates");
                     if (candidates.isArray() && !candidates.isEmpty()) {
                         String rawJson = candidates.get(0).path("content").path("parts").get(0).path("text").asText();
-                        rawJson = cleanJsonOutput(rawJson);
+                        String cleaned = cleanJsonOutput(rawJson);
+                        JsonNode parsed = objectMapper.readTree(cleaned);
 
-                        JsonNode parsed = objectMapper.readTree(rawJson);
-                        if (parsed.has("summary")) meeting.setSummary(parsed.get("summary").asText());
-                        if (parsed.has("actionItems")) meeting.setActionItems(parsed.get("actionItems").asText());
-                        if (parsed.has("decisions")) meeting.setDecisions(parsed.get("decisions").asText());
-                        if (parsed.has("openQuestions")) meeting.setOpenQuestions(parsed.get("openQuestions").asText());
+                        meeting.setSummary(extractJsonField(parsed, "summary", content));
+                        meeting.setActionItems(extractJsonField(parsed, "actionItems", "- [ ] Review discussion."));
+                        meeting.setDecisions(extractJsonField(parsed, "decisions", "- Key points noted."));
+                        meeting.setOpenQuestions(extractJsonField(parsed, "openQuestions", "- None identified."));
                         return true;
                     }
                 }
@@ -276,13 +277,7 @@ public class MeetingService {
                 RestTemplate restTemplate = new RestTemplate();
                 String url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + geminiApiKey.trim();
 
-                String prompt = "Listen to this meeting audio titled '" + title + "'.\n" +
-                        "1. Transcribe the spoken audio into full dialogue text.\n" +
-                        "2. Generate an in-depth, thorough executive summary.\n" +
-                        "3. Extract action items with explicit deadlines (formatted as '- [ ] Task (Due: Deadline)').\n" +
-                        "4. List all key decisions and agreements.\n" +
-                        "5. Identify open questions or blockers.\n\n" +
-                        "Return ONLY a valid JSON object with keys: \"transcript\", \"summary\", \"actionItems\", \"decisions\", \"openQuestions\".";
+                String prompt = "Listen to this audio file and return a JSON object with keys: \"transcript\", \"summary\", \"actionItems\", \"decisions\", \"openQuestions\".";
 
                 Map<String, Object> requestBody = new HashMap<>();
                 List<Map<String, Object>> parts = new ArrayList<>();
@@ -313,15 +308,16 @@ public class MeetingService {
                     JsonNode candidates = root.path("candidates");
                     if (candidates.isArray() && !candidates.isEmpty()) {
                         String rawJson = candidates.get(0).path("content").path("parts").get(0).path("text").asText();
-                        rawJson = cleanJsonOutput(rawJson);
+                        String cleaned = cleanJsonOutput(rawJson);
+                        JsonNode parsed = objectMapper.readTree(cleaned);
 
-                        JsonNode parsed = objectMapper.readTree(rawJson);
                         if (parsed.has("transcript")) meeting.setContent(parsed.get("transcript").asText());
                         else meeting.setContent("[Audio Transcribed: " + file.getOriginalFilename() + "]");
-                        if (parsed.has("summary")) meeting.setSummary(parsed.get("summary").asText());
-                        if (parsed.has("actionItems")) meeting.setActionItems(parsed.get("actionItems").asText());
-                        if (parsed.has("decisions")) meeting.setDecisions(parsed.get("decisions").asText());
-                        if (parsed.has("openQuestions")) meeting.setOpenQuestions(parsed.get("openQuestions").asText());
+
+                        meeting.setSummary(extractJsonField(parsed, "summary", meeting.getContent()));
+                        meeting.setActionItems(extractJsonField(parsed, "actionItems", "- [ ] Review discussion."));
+                        meeting.setDecisions(extractJsonField(parsed, "decisions", "- Key takeaways captured."));
+                        meeting.setOpenQuestions(extractJsonField(parsed, "openQuestions", "- None identified."));
                         return true;
                     }
                 }
@@ -330,6 +326,21 @@ public class MeetingService {
             }
         }
         return false;
+    }
+
+    private String extractJsonField(JsonNode node, String fieldName, String defaultValue) {
+        if (node.has(fieldName)) {
+            JsonNode f = node.get(fieldName);
+            if (f.isArray()) {
+                StringBuilder sb = new StringBuilder();
+                for (JsonNode item : f) {
+                    sb.append("- ").append(item.asText()).append("\n");
+                }
+                return sb.toString().trim();
+            }
+            return f.asText();
+        }
+        return defaultValue;
     }
 
     private String cleanJsonOutput(String raw) {
@@ -346,11 +357,7 @@ public class MeetingService {
     }
 
     private void applyHeuristicSummary(Meeting meeting, String content) {
-        meeting.setSummary("Detailed Executive Overview:\n" +
-                "The meeting focused on the strategic review of '" + meeting.getTitle() + "'. " +
-                "Key discussions centered around operational progress, deliverables, and alignment across key stakeholders. " +
-                "Action items and critical timelines were evaluated to ensure milestones are met on schedule.\n\n" +
-                "Transcript / Notes Content:\n" + content);
+        meeting.setSummary("Summary of Discussion:\n" + content);
 
         StringBuilder actionItems = new StringBuilder();
         StringBuilder decisions = new StringBuilder();
@@ -372,7 +379,7 @@ public class MeetingService {
 
             if (lower.contains("?") || lower.contains("who ") || lower.contains("what ") || lower.contains("how ") || lower.contains("why ")) {
                 questions.append("- ").append(part).append("?\n");
-            } else if (lower.contains("decide") || lower.contains("decision") || lower.contains("agree") || lower.contains("launch")) {
+            } else if (lower.contains("decide") || lower.contains("decision") || lower.contains("agree") || lower.contains("launch") || lower.contains("announce")) {
                 decisions.append("- ").append(part).append("\n");
             } else if (lower.contains("task") || lower.contains("todo") || lower.contains("will ") || lower.contains("need") || lower.contains("send") || !deadline.isEmpty()) {
                 actionItems.append("- [ ] ").append(part).append(deadline).append("\n");
@@ -380,13 +387,13 @@ public class MeetingService {
         }
 
         if (actionItems.length() == 0) {
-            actionItems.append("- [ ] Review discussed action items and follow up.");
+            actionItems.append("- [ ] Review audio transcript and discussed points.");
         }
         if (decisions.length() == 0) {
-            decisions.append("- Team aligned on current priorities and roadmap.");
+            decisions.append("- Key discussion points captured from audio.");
         }
         if (questions.length() == 0) {
-            questions.append("- No pending blockers identified.");
+            questions.append("- No open blockers identified.");
         }
 
         meeting.setActionItems(actionItems.toString().trim());
