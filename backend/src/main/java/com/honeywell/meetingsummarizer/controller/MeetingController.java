@@ -50,14 +50,7 @@ public class MeetingController {
             return ResponseEntity.badRequest().build();
         }
 
-        // Simulate audio transcription
-        Meeting meeting = new Meeting();
-        meeting.setTitle(title);
-        meeting.setContent("[Transcribed from audio file: " + file.getOriginalFilename() + "]\n\n" +
-                           "This is a simulated transcription of the uploaded audio file. " +
-                           "In a real environment, this audio would be sent to OpenAI Whisper or Google Gemini API.");
-
-        Meeting savedMeeting = meetingService.createAndSummarizeMeeting(meeting);
+        Meeting savedMeeting = meetingService.processAudioMeeting(title, file);
         return ResponseEntity.ok(savedMeeting);
     }
     @DeleteMapping("/{id}")
