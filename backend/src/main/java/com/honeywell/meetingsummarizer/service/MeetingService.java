@@ -6,11 +6,11 @@ import com.honeywell.meetingsummarizer.model.Meeting;
 import com.honeywell.meetingsummarizer.repository.MeetingRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpEntity;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.http.*;
 import org.springframework.stereotype.Service;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -26,7 +26,10 @@ public class MeetingService {
     private final MeetingRepository meetingRepository;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    @Value("${gemini.api.key}")
+    @Value("${groq.api.key:}")
+    private String groqApiKey;
+
+    @Value("${gemini.api.key:}")
     private String geminiApiKey;
 
     @Autowired
@@ -46,19 +49,28 @@ public class MeetingService {
         String content = meeting.getContent() != null ? meeting.getContent() : "";
         String title = meeting.getTitle() != null ? meeting.getTitle() : "Untitled Meeting";
 
-        boolean geminiSuccess = false;
+        boolean aiSuccess = false;
 
-        // Try real Gemini AI first if API key is provided
-        if (geminiApiKey != null && !geminiApiKey.isEmpty() && !geminiApiKey.contains("YOUR_GEMINI_API_KEY")) {
+        // 1. Try Groq AI (Llama 3.3 70B) first
+        if (hasValidKey(groqApiKey)) {
             try {
-                geminiSuccess = summarizeWithGemini(meeting, title, content);
+                aiSuccess = summarizeWithGroq(meeting, title, content);
             } catch (Exception e) {
-                System.err.println("Gemini API call failed: " + e.getMessage() + ". Falling back to smart heuristic parsing.");
+                System.err.println("Groq text summarization failed: " + e.getMessage());
             }
         }
 
-        // Fallback to smart heuristic parsing if Gemini is not configured or failed
-        if (!geminiSuccess) {
+        // 2. Try Gemini AI fallback
+        if (!aiSuccess && hasValidKey(geminiApiKey)) {
+            try {
+                aiSuccess = summarizeWithGemini(meeting, title, content);
+            } catch (Exception e) {
+                System.err.println("Gemini text summarization failed: " + e.getMessage());
+            }
+        }
+
+        // 3. Heuristic fallback
+        if (!aiSuccess) {
             applyHeuristicSummary(meeting, content);
         }
 
@@ -69,28 +81,133 @@ public class MeetingService {
         Meeting meeting = new Meeting();
         meeting.setTitle(title);
 
-        boolean geminiSuccess = false;
-        if (geminiApiKey != null && !geminiApiKey.isEmpty() && !geminiApiKey.contains("YOUR_GEMINI_API_KEY") && file != null && !file.isEmpty()) {
+        boolean audioProcessed = false;
+
+        // 1. Try Groq Whisper (Ultra fast, state of the art speech-to-text)
+        if (hasValidKey(groqApiKey) && file != null && !file.isEmpty()) {
             try {
-                geminiSuccess = processAudioWithGemini(meeting, title, file);
+                String transcript = transcribeAudioWithGroq(file);
+                if (transcript != null && !transcript.trim().isEmpty()) {
+                    meeting.setContent(transcript);
+                    boolean summaryOk = summarizeWithGroq(meeting, title, transcript);
+                    if (!summaryOk) {
+                        applyHeuristicSummary(meeting, transcript);
+                    }
+                    audioProcessed = true;
+                }
             } catch (Exception e) {
-                System.err.println("Gemini Audio processing failed: " + e.getMessage());
+                System.err.println("Groq audio transcription failed: " + e.getMessage());
             }
         }
 
-        if (!geminiSuccess) {
+        // 2. Try Gemini Multimodal Audio fallback
+        if (!audioProcessed && hasValidKey(geminiApiKey) && file != null && !file.isEmpty()) {
+            try {
+                audioProcessed = processAudioWithGemini(meeting, title, file);
+            } catch (Exception e) {
+                System.err.println("Gemini audio processing failed: " + e.getMessage());
+            }
+        }
+
+        // 3. Fallback
+        if (!audioProcessed) {
             String filename = file != null ? file.getOriginalFilename() : "audio_recording.mp3";
             meeting.setContent("[Audio Recording: " + filename + "]\n\n" +
-                               "Meeting discussion recorded. Key agenda points and action items were discussed by team members.");
+                               "Meeting audio uploaded. Ensure your Groq API key (gsk_...) is configured on Render to activate real-time Whisper transcription.");
             applyHeuristicSummary(meeting, meeting.getContent());
         }
 
         return meetingRepository.save(meeting);
     }
 
+    private boolean hasValidKey(String key) {
+        return key != null && !key.trim().isEmpty() && !key.contains("YOUR_");
+    }
+
+    private String transcribeAudioWithGroq(MultipartFile file) throws Exception {
+        RestTemplate restTemplate = new RestTemplate();
+        String url = "https://api.groq.com/openai/v1/audio/transcriptions";
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+        headers.setBearerAuth(groqApiKey.trim());
+
+        ByteArrayResource fileResource = new ByteArrayResource(file.getBytes()) {
+            @Override
+            public String getFilename() {
+                return file.getOriginalFilename() != null ? file.getOriginalFilename() : "audio.mp3";
+            }
+        };
+
+        MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+        body.add("file", fileResource);
+        body.add("model", "whisper-large-v3");
+        body.add("response_format", "json");
+
+        HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
+        ResponseEntity<String> response = restTemplate.postForEntity(url, requestEntity, String.class);
+
+        if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+            JsonNode root = objectMapper.readTree(response.getBody());
+            if (root.has("text")) {
+                return root.get("text").asText();
+            }
+        }
+        return null;
+    }
+
+    private boolean summarizeWithGroq(Meeting meeting, String title, String content) {
+        try {
+            RestTemplate restTemplate = new RestTemplate();
+            String url = "https://api.groq.com/openai/v1/chat/completions";
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.setBearerAuth(groqApiKey.trim());
+
+            String systemPrompt = "You are 'Meeting Charcha', an elite executive AI meeting analyst.\n" +
+                    "Analyze the provided transcript and produce a detailed, highly structured breakdown in strict JSON format.\n" +
+                    "Return ONLY a JSON object with these exact keys:\n" +
+                    "- \"summary\": A thorough, comprehensive executive overview explaining the key topics, background context, and major discussion outcomes in depth.\n" +
+                    "- \"actionItems\": A markdown bulleted checklist of all actionable tasks and responsibilities. Extract any explicit deadlines mentioned (e.g. today, tomorrow, Friday, next week, EOD, specific dates) and format each item as: \"- [ ] Task description (Due: Deadline)\".\n" +
+                    "- \"decisions\": A markdown bulleted list of all decisions, agreements, and next steps finalized.\n" +
+                    "- \"openQuestions\": A markdown bulleted list of unanswered questions, blockers, or discussion points.";
+
+            Map<String, Object> requestBody = new HashMap<>();
+            requestBody.put("model", "llama-3.3-70b-versatile");
+
+            List<Map<String, String>> messages = new ArrayList<>();
+            messages.add(Map.of("role", "system", "content", systemPrompt));
+            messages.add(Map.of("role", "user", "content", "Meeting Title: " + title + "\n\nTranscript:\n" + content));
+            requestBody.put("messages", messages);
+
+            Map<String, String> responseFormat = new HashMap<>();
+            responseFormat.put("type", "json_object");
+            requestBody.put("response_format", responseFormat);
+
+            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(requestBody, headers);
+            ResponseEntity<String> response = restTemplate.postForEntity(url, entity, String.class);
+
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                JsonNode root = objectMapper.readTree(response.getBody());
+                String contentJson = root.path("choices").get(0).path("message").path("content").asText();
+                JsonNode parsed = objectMapper.readTree(contentJson);
+
+                if (parsed.has("summary")) meeting.setSummary(parsed.get("summary").asText());
+                if (parsed.has("actionItems")) meeting.setActionItems(parsed.get("actionItems").asText());
+                if (parsed.has("decisions")) meeting.setDecisions(parsed.get("decisions").asText());
+                if (parsed.has("openQuestions")) meeting.setOpenQuestions(parsed.get("openQuestions").asText());
+                return true;
+            }
+        } catch (Exception e) {
+            System.err.println("Groq LLM error: " + e.getMessage());
+        }
+        return false;
+    }
+
     private boolean summarizeWithGemini(Meeting meeting, String title, String content) {
         String[] models = {"gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"};
-        
+
         for (String model : models) {
             try {
                 RestTemplate restTemplate = new RestTemplate();
@@ -104,7 +221,7 @@ public class MeetingService {
                         "- \"actionItems\": A markdown bulleted checklist of every assigned task. Detect any mentioned deadlines (e.g. today, tomorrow, Friday, next week, EOD, specific dates) and format each item as: \"- [ ] Task description (Due: Deadline)\".\n" +
                         "- \"decisions\": A markdown bulleted list of all decisions, agreements, and next steps finalized during the meeting.\n" +
                         "- \"openQuestions\": A markdown bulleted list of unresolved topics, unanswered questions, or potential risks mentioned.\n\n" +
-                        "Return ONLY raw valid JSON (no surrounding markdown code blocks).";
+                        "Return ONLY raw valid JSON.";
 
                 Map<String, Object> requestBody = new HashMap<>();
                 Map<String, Object> part = new HashMap<>();
@@ -159,13 +276,12 @@ public class MeetingService {
                 RestTemplate restTemplate = new RestTemplate();
                 String url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + geminiApiKey.trim();
 
-                String prompt = "You are 'Meeting Charcha', an expert AI audio transcriber and analyst.\n" +
-                        "Listen carefully to this recorded meeting audio titled '" + title + "'.\n" +
+                String prompt = "Listen to this meeting audio titled '" + title + "'.\n" +
                         "1. Transcribe the spoken audio into full dialogue text.\n" +
-                        "2. Generate an in-depth, thorough executive summary explaining the discussions, agenda, and context in detail.\n" +
-                        "3. Extract all action items and tasks with their explicit deadlines (formatted as '- [ ] Task (Due: Deadline)').\n" +
+                        "2. Generate an in-depth, thorough executive summary.\n" +
+                        "3. Extract action items with explicit deadlines (formatted as '- [ ] Task (Due: Deadline)').\n" +
                         "4. List all key decisions and agreements.\n" +
-                        "5. Identify any open questions, blockers, or discussion points.\n\n" +
+                        "5. Identify open questions or blockers.\n\n" +
                         "Return ONLY a valid JSON object with keys: \"transcript\", \"summary\", \"actionItems\", \"decisions\", \"openQuestions\".";
 
                 Map<String, Object> requestBody = new HashMap<>();
@@ -327,4 +443,3 @@ public class MeetingService {
         return meetingRepository.save(meeting);
     }
 }
-
