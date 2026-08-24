@@ -168,22 +168,21 @@ public class MeetingService {
                 headers.setContentType(MediaType.APPLICATION_JSON);
                 headers.setBearerAuth(groqApiKey.trim());
 
-                String systemPrompt = "You are 'Meeting Charcha', an elite executive AI meeting analyst.\n" +
-                        "Analyze the provided transcript and produce a concise executive summary, actionable tasks, decisions, and questions.\n" +
-                        "CRITICAL INSTRUCTIONS:\n" +
-                        "1. \"summary\": Write a concise, 2-3 sentence executive gist explaining what the discussion was about, key context, and the overall outcome. DO NOT copy or repeat the transcript verbatim.\n" +
-                        "2. \"actionItems\": A markdown bulleted checklist of any tasks or commitments mentioned, with deadlines if stated formatted as \"- [ ] Task (Due: Deadline)\". If no tasks, write \"- No action items identified.\"\n" +
-                        "3. \"decisions\": Markdown bullet points summarizing the core takeaways, announcements, or agreements.\n" +
-                        "4. \"openQuestions\": Markdown bullet points of any questions asked or follow-ups needed.\n\n" +
-                        "Return ONLY valid JSON matching this schema: {\"summary\": \"...\", \"actionItems\": \"...\", \"decisions\": \"...\", \"openQuestions\": \"...\"}";
+                String prompt = "You are an executive AI assistant called 'Meeting Charcha'.\n" +
+                        "Analyze this spoken meeting audio transcript:\n\n\"\"\"\n" + content + "\n\"\"\"\n\n" +
+                        "Generate a structured JSON response. You MUST return ONLY a valid JSON object with these 4 keys:\n" +
+                        "1. \"summary\": A concise executive gist (2-3 sentences) synthesizing the core topic, context, and key takeaway. DO NOT repeat the transcript.\n" +
+                        "2. \"actionItems\": A markdown bulleted checklist of tasks with deadlines if mentioned (format: \"- [ ] Task (Due: Date)\"). If none, write \"- No action items identified.\"\n" +
+                        "3. \"decisions\": Markdown bullet points summarizing key decisions, announcements, or conclusions.\n" +
+                        "4. \"openQuestions\": Markdown bullet points of any unresolved items or follow-ups.\n";
 
                 Map<String, Object> requestBody = new HashMap<>();
                 requestBody.put("model", model);
                 requestBody.put("temperature", 0.2);
 
                 List<Map<String, String>> messages = new ArrayList<>();
-                messages.add(Map.of("role", "system", "content", systemPrompt));
-                messages.add(Map.of("role", "user", "content", "Meeting Title: " + title + "\n\nSpoken Content:\n" + content));
+                messages.add(Map.of("role", "system", "content", "You are a meeting analysis assistant. Always respond with raw valid JSON."));
+                messages.add(Map.of("role", "user", "content", prompt));
                 requestBody.put("messages", messages);
 
                 Map<String, String> responseFormat = new HashMap<>();
@@ -197,19 +196,27 @@ public class MeetingService {
                     JsonNode root = objectMapper.readTree(response.getBody());
                     String contentJson = root.path("choices").get(0).path("message").path("content").asText();
                     String cleaned = cleanJsonOutput(contentJson);
-                    JsonNode parsed = objectMapper.readTree(cleaned);
+                    
+                    try {
+                        JsonNode parsed = objectMapper.readTree(cleaned);
+                        String summary = extractJsonField(parsed, "summary", null);
+                        String actionItems = extractJsonField(parsed, "actionItems", "- No action items identified.");
+                        String decisions = extractJsonField(parsed, "decisions", "- Key points noted.");
+                        String openQuestions = extractJsonField(parsed, "openQuestions", "- None identified.");
 
-                    String summary = extractJsonField(parsed, "summary", null);
-                    String actionItems = extractJsonField(parsed, "actionItems", "- No specific action items mentioned.");
-                    String decisions = extractJsonField(parsed, "decisions", "- Key points noted from conversation.");
-                    String openQuestions = extractJsonField(parsed, "openQuestions", "- None identified.");
-
-                    if (summary != null && !summary.trim().isEmpty()) {
-                        meeting.setSummary(summary);
-                        meeting.setActionItems(actionItems);
-                        meeting.setDecisions(decisions);
-                        meeting.setOpenQuestions(openQuestions);
-                        return true;
+                        if (summary != null && !summary.trim().isEmpty() && !summary.equals(content)) {
+                            meeting.setSummary(summary);
+                            meeting.setActionItems(actionItems);
+                            meeting.setDecisions(decisions);
+                            meeting.setOpenQuestions(openQuestions);
+                            return true;
+                        }
+                    } catch (Exception parseEx) {
+                        // If JSON parsing fails but LLM returned text, use cleaned LLM output directly
+                        if (!cleaned.isEmpty()) {
+                            meeting.setSummary(cleaned);
+                            return true;
+                        }
                     }
                 }
             } catch (Exception e) {
@@ -384,7 +391,16 @@ public class MeetingService {
     }
 
     private void applyHeuristicSummary(Meeting meeting, String content) {
-        meeting.setSummary("Summary of Discussion:\n" + content);
+        String cleanContent = content.replaceAll("\\[.*?\\]", "").replaceAll("\\s+", " ").trim();
+        String gist;
+        if (cleanContent.length() > 200) {
+            gist = "This recorded session covered: " + cleanContent.substring(0, 180).trim() + "... Key topics were discussed and evaluated.";
+        } else if (!cleanContent.isEmpty()) {
+            gist = "Discussion focusing on: " + cleanContent;
+        } else {
+            gist = "Meeting session recorded for review.";
+        }
+        meeting.setSummary(gist);
 
         StringBuilder actionItems = new StringBuilder();
         StringBuilder decisions = new StringBuilder();
