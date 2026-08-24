@@ -165,17 +165,18 @@ public class MeetingService {
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.setBearerAuth(groqApiKey.trim());
 
-            String systemPrompt = "You are 'Meeting Charcha', an expert AI meeting analyst.\n" +
-                    "Analyze the provided transcript and extract all insights strictly based on what was actually said in the audio/transcript.\n" +
-                    "Do NOT use generic templates or irrelevant corporate filler.\n" +
+            String systemPrompt = "You are 'Meeting Charcha', an expert AI meeting intelligence analyst.\n" +
+                    "Analyze the provided transcript and extract high-value insights strictly based on the spoken content.\n" +
+                    "CRITICAL: The \"summary\" must be a concise, executive-level gist (2-4 sentences) that synthesizes the core message, context, and key takeaway. DO NOT repeat or echo the transcript verbatim.\n" +
                     "Return ONLY a JSON object with these exact keys:\n" +
-                    "- \"summary\": A clear, professional summary explaining exactly what was said in the transcript/audio in detail.\n" +
-                    "- \"actionItems\": Markdown bullet points of actionable items and tasks. If deadlines are mentioned (e.g. tomorrow, Friday, next week, EOD), format as: \"- [ ] Task (Due: Deadline)\". If none, state \"- No specific action items mentioned.\"\n" +
-                    "- \"decisions\": Markdown bullet points explaining all key points, announcements, decisions, or core takeaways from the conversation.\n" +
-                    "- \"openQuestions\": Markdown bullet points of any questions asked, unresolved items, or potential follow-ups.";
+                    "- \"summary\": A high-level executive gist summarizing the conversation, its core topic, and the overall outcome.\n" +
+                    "- \"actionItems\": Markdown checklist of specific tasks or actions mentioned with deadlines formatted as \"- [ ] Task (Due: Deadline)\". If none, write \"- No specific action items mentioned.\"\n" +
+                    "- \"decisions\": Markdown bullet points summarizing the key takeaways, agreements, or announcements.\n" +
+                    "- \"openQuestions\": Markdown bullet points of any unresolved questions, uncertainties, or follow-ups.";
 
             Map<String, Object> requestBody = new HashMap<>();
             requestBody.put("model", "llama-3.3-70b-versatile");
+            requestBody.put("temperature", 0.3);
 
             List<Map<String, String>> messages = new ArrayList<>();
             messages.add(Map.of("role", "system", "content", systemPrompt));
